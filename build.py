@@ -882,6 +882,14 @@ def CleanupFiles(path, file_name, clean_all = False):
     except OSError:
       print >>sys.stderr, "    * Cannot cleanup file \"%s\"." % file_name;
       cleanup_errors = True;
+    pdb_file_name = re.sub(r"\.[^\.]*$", ".pdb", file_name);
+    if os.path.isfile(os.path.join(path, pdb_file_name)):
+      print "      - Cleanup: %s" % pdb_file_name;
+      try:
+        os.remove(os.path.join(path, pdb_file_name));
+      except OSError:
+        print >>sys.stderr, "    * Cannot cleanup debug symbols file \"%s\"." % intermediate_file_name;
+        cleanup_errors = True;
   intermediate_file_names = [re.sub(r"\.[^\.]*$", ".ilk", file_name),
                              re.sub(r"\.[^\.]*$", ".exp", file_name),
                              re.sub(r"\.[^\.]*$", ".lib", file_name)];
