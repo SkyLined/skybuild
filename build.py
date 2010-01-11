@@ -28,6 +28,8 @@ import command_line_options;
 g_verbose_output = False;
 g_loop_on_error = False;
 g_create_build_config_files = False;
+g_clean_build = False;
+g_dirty_build = False;
 
 def find_in_path(filename):
   for path in os.environ["PATH"].split(";"):
@@ -79,6 +81,7 @@ required_project_options = [
 ];
 valid_file_options = {
     "sources": None,
+    "includes": None,
     "entry point": None, 
     "architecture": ["x86", "x64"],
     "subsystem": ["windows", "console"],
@@ -86,6 +89,7 @@ valid_file_options = {
     "debug": [True, False],
     "defines": None,
     "prebuild commands": None, 
+    "build commands": None, 
     "postbuild commands": None,
     "test commands": None, 
     "finish commands": None
@@ -188,7 +192,7 @@ def WriteFile(path, contents):
     fd.close();
 
 def Main():
-  global g_verbose_output, g_loop_on_error, g_create_build_config_files;
+  global g_verbose_output, g_loop_on_error, g_create_build_config_files, g_clean_build, g_dirty_build;
   options = command_line_options.CommandLineOptions(
     application_name = 'build',
     help_message = """
@@ -210,29 +214,43 @@ Notes:
     },
     switches = {
       'verbose': {
-        'short': 'v',
-        'help': 'Output verbose information while building.',
-        'initial': 'false', 
-        'default': 'true',
-        'valid': command_line_options.BOOLEAN_SWITCH_VALUES
+        'short':    'v',
+        'help':     'Output verbose information while building.',
+        'initial':  'false', 
+        'default':  'true',
+        'valid':    command_line_options.BOOLEAN_SWITCH_VALUES
       },
       'loop': {
-        'short': 'l',
-        'help': ('If there is an error during build, pause to allow the '
-                 'user to fix the issue and then press ENTER to attempt '
-                 'building again.'),
-        'initial': 'true',
-        'default': 'true',
-        'valid': command_line_options.BOOLEAN_SWITCH_VALUES
+        'short':    'l',
+        'help':     'If there is an error during build, pause to allow the ' \
+                    'user to fix the issue and then press ENTER to attempt ' \
+                    'building again.',
+        'initial':  'true',
+        'default':  'true',
+        'valid':    command_line_options.BOOLEAN_SWITCH_VALUES
       },
       'create': {
-        'short': 'c',
-        'help': 'If no build config file or script is found, create one.',
-        'initial': 'true',
-        'default': 'true',
-        'valid': command_line_options.BOOLEAN_SWITCH_VALUES
-      }
-    }
+        'short':    'c',
+        'help':     'If no build config file or script is found, create one.',
+        'initial':  'false',
+        'default':  'true',
+        'valid':    command_line_options.BOOLEAN_SWITCH_VALUES
+      },
+      'clean': {
+        'short':    'n',
+        'help':     'Do not clean up intermediate build files.',
+        'initial':  'false',
+        'default':  'true',
+        'valid':    command_line_options.BOOLEAN_SWITCH_VALUES
+      },
+      'dirty': {
+        'short':    'd',
+        'help':     'Dirty build: do not clean up intermediate build files.',
+        'initial':  'false',
+        'default':  'true',
+        'valid':    command_line_options.BOOLEAN_SWITCH_VALUES
+      },
+    },
   );
   valid_arguments, continue_execution = options.ParseArguments(sys.argv[1:]);
   if not continue_execution:
@@ -241,14 +259,22 @@ Notes:
   g_verbose_output            = options.GetSwitchValue('verbose');
   g_loop_on_error             = options.GetSwitchValue('loop');
   g_create_build_config_files = options.GetSwitchValue('create');
+  g_clean_build               = options.GetSwitchValue('clean');
+  g_dirty_build               = options.GetSwitchValue('dirty');
 
   while (1):
     if not BuildFolder(path):
-      print "@ Build failed.";
+      if g_clean_build:
+        print "@ Clean failed.";
+      else:
+        print "@ Build failed.";
       if not g_loop_on_error:
         return False;
     else:
-      print "@ Build successful.";
+      if g_clean_build:
+        print "@ Clean successful.";
+      else:
+        print "@ Build successful.";
       return True;
     print "Press CTRL+C to terminate or ENTER to retry...";
     raw_input();
@@ -419,7 +445,6 @@ def GenerateBuildConfig(path, sub_folder = False):
   return build_config;
 
 def BuildFolder(path, build_info = None, root_folder_build_config = None):
-  global g_verbose_output;
   saved_path = os.getcwd();
   short_path = ShortPath(path);
   print "== %s ==" % ShortName(path);
@@ -445,9 +470,6 @@ def BuildFolder(path, build_info = None, root_folder_build_config = None):
         build_info["version"], build_info["number"], build_info["timestamp"])
     if not root_folder_build_config:
       root_folder_build_config = build_config;
-    # Switch on g_verbose_output output if requested.
-    if "g_verbose_output" in build_config:
-      g_verbose_output = build_config["g_verbose_output"];
     # See if we need to build sub-folders:
     child_folders = GetOption("folders", None, build_config);
     if child_folders is not None:
@@ -459,8 +481,9 @@ def BuildFolder(path, build_info = None, root_folder_build_config = None):
       print "  @ Child folders built successful.";
     # Start building this folder:
     # Optionally run prebuild commands:
-    if not DoPrebuildCommands(build_config, "  "):
-      return False;
+    if not g_clean_build:
+      if not DoPrebuildCommands(build_config, "  "):
+        return False;
     project_configs = GetOption("projects", [], build_config);
     projects_built = [];
     while (len(projects_built) < len(project_configs)):
@@ -472,31 +495,41 @@ def BuildFolder(path, build_info = None, root_folder_build_config = None):
         # Check if all options are valid
         if not CheckConfigOptions(project_config, "project \"%s\"" % project_name, 
             required_project_options, valid_project_options):
-          CleanupFolder(path, build_info, build_config, clean_all = True);
+          if not g_dirty_build:
+            CleanupFolder(path, build_info, build_config, clean_all = True);
           return False;
         # For each project that this project depends on:
         wait_for_dependencees = False;
-        if "dependencies" in project_config:
-          for dependee_project_name in project_config["dependencies"]:
-            # The dependee must be a project in the build configuration, or it can never be build:
-            if dependee_project_name not in project_configs:
-              print >>sys.stderr, "    * Unknown dependee project \"%s\" for project \"%s\"." % (
-                  dependee_project_name, project_name);
-              CleanupFolder(path, build_info, build_config, clean_all = True);
-              return False;
-            # Check if the dependee has already been built:
-            elif not dependee_project_name in projects_built:
-              # No; we cannot built this project yet until the dependee is built.
-              if g_verbose_output: print "    - Waiting for \"%s\"..." % dependee_project_name;
-              wait_for_dependencees = True;
-              break;
+        if not g_clean_build:
+          if "dependencies" in project_config:
+            for dependee_project_name in project_config["dependencies"]:
+              # The dependee must be a project in the build configuration, or it can never be build:
+              if dependee_project_name not in project_configs:
+                print >>sys.stderr, "    * Unknown dependee project \"%s\" for project \"%s\"." % (
+                    dependee_project_name, project_name);
+                if not g_dirty_build:
+                  CleanupFolder(path, build_info, build_config, clean_all = True);
+                return False;
+              # Check if the dependee has already been built:
+              elif not dependee_project_name in projects_built:
+                # No; we cannot built this project yet until the dependee is built.
+                if g_verbose_output:
+                  if not wait_for_dependencees:
+                    print "  [%s]" % project_name;
+                  print "    - Waiting for \"%s\"..." % dependee_project_name;
+                wait_for_dependencees = True;
+                break;
         if not wait_for_dependencees:
           # All dependees have been built; we can build this project:
           if not BuildProject(path, build_info, build_config, project_config, project_name):
-            CleanupFolder(path, build_info, build_config, clean_all = True);
+            if not g_dirty_build:
+              CleanupFolder(path, build_info, build_config, clean_all = True);
             print "    @ Project build failed.";
             return False;
-          print "    @ Project build successful.";
+          if g_clean_build:
+            print "    @ Project clean successful.";
+          else:
+            print "    @ Project build successful.";
           # Mark the project as built:
           projects_built += [project_name];
           progress = True;
@@ -513,13 +546,17 @@ def BuildFolder(path, build_info = None, root_folder_build_config = None):
               # Projects mentioned in the build configuration that have not been built cause circular dependencies:
               if not dependee_project_name in projects_built:
                 print >>sys.stderr, "    * %s:" % dependee_project_name;
-        CleanupFolder(path, build_info, build_config, clean_all = True);
+        if not g_dirty_build:
+          CleanupFolder(path, build_info, build_config, clean_all = True);
         return False;
     # Optionally run postbuild/test/finish commands:
-    if not DoPostbuildTestFinishCommands(build_config, "  "):
-      CleanupFolder(path, build_info, build_config, clean_all = True);
-      return False;
-    CleanupFolder(path, build_info, build_config, clean_all = False);
+    if not g_clean_build:
+      if not DoPostbuildTestFinishCommands(build_config, "  "):
+        if not g_dirty_build:
+          CleanupFolder(path, build_info, build_config, clean_all = True);
+        return False;
+    if not g_dirty_build:
+      CleanupFolder(path, build_info, build_config, clean_all = False);
     return True;
   finally:
     os.chdir(saved_path);
@@ -549,8 +586,9 @@ def BuildProject(path, build_info, build_config, project_config, project_name):
   else:
     build_info["version"] = GetOption("version", None, build_config);
   # Optionally run prebuild commands:
-  if not DoPrebuildCommands(project_config, "    "):
-    return False;
+  if not g_clean_build:
+    if not DoPrebuildCommands(project_config, "    "):
+      return False;
   file_configs = GetOption("files", None, project_config);
   files_built = [];
   while (len(files_built) < len(file_configs)):
@@ -562,28 +600,54 @@ def BuildProject(path, build_info, build_config, project_config, project_name):
       # Check if all options are valid
       if not CheckConfigOptions(file_config, "file \"%s\"" % file_name, required_file_options, valid_file_options):
         return False;
-      # For each source file required for building this file:
-      wait_for_sources = False;
-      for source_file_name in file_config["sources"]:
-        # If this file is not mentioned in the build configuration, it must be a static source file:
-        if source_file_name not in file_configs:
-          # Check if the source file exists:
-          if not os.path.isfile(os.path.join(path, source_file_name)):
-            print >>sys.stderr, "    * Missing source file \"%s\" for for \"%s\"." % (source_file_name, file_name);
-            return False;
-        # If this file is mentioned in the build configuration, see if it has already been built:
-        elif not source_file_name in files_built:
-          # No; we cannot built this file yet because its sources have not all been built yet.
-          if g_verbose_output: print "      - Waiting for \"%s\"..." % source_file_name;
-          wait_for_sources = True;
-          break;
-      if not wait_for_sources:
-        # All sources have been built; we can build this file:
-        if not BuildFile(path, build_info, build_config, project_config, file_config, file_name):
-          return False;
-        # Mark the file as built:
+      if g_clean_build:
+        CleanupFiles(path, file_name, clean_all = True);
         files_built += [file_name];
         progress = True;
+      else:
+        # For each source file required for building this file:
+        wait_for_sources = False;
+        for source_file_name in file_config["sources"]:
+          # If this file is not mentioned in the build configuration, it must be a static source file:
+          if source_file_name not in file_configs:
+            # Check if the source file exists:
+            if not os.path.isfile(os.path.join(path, source_file_name)):
+              print >>sys.stderr, "    * Missing source file \"%s\" for for \"%s\"." % (source_file_name, file_name);
+              return False;
+          # If this file is mentioned in the build configuration, see if it has already been built:
+          elif not source_file_name in files_built:
+            # No; we cannot built this file yet because its sources have not all been built yet.
+            if g_verbose_output:
+              if not wait_for_sources:
+                print "    + File: %s" % file_name;
+              print "      - Waiting for \"%s\"..." % source_file_name;
+            wait_for_sources = True;
+            break;
+        if "includes" in file_config:
+          for include_file_name in file_config["includes"]:
+            # If this file is not mentioned in the build configuration, it must be a static include source file:
+            if include_file_name not in file_configs:
+              # Check if the include source file exists:
+              if not os.path.isfile(os.path.join(path, include_file_name)):
+                print >>sys.stderr, "    * Missing include source file \"%s\" for for \"%s\"." % \
+                    (include_file_name, file_name);
+                return False;
+            # If this file is mentioned in the build configuration, see if it has already been built:
+            elif not include_file_name in files_built:
+              # No; we cannot built this file yet because its include sources have not all been built yet.
+              if g_verbose_output:
+                if not wait_for_sources:
+                  print "    + File: %s" % file_name;
+                print "      - Waiting for \"%s\"..." % include_file_name;
+              wait_for_sources = True;
+              break;
+        if not wait_for_sources:
+          # All sources have been built; we can build this file:
+          if not BuildFile(path, build_info, build_config, project_config, file_config, file_name):
+            return False;
+          # Mark the file as built:
+          files_built += [file_name];
+          progress = True;
     # If there are circular dependencies, this loop will stop making progress before all files have been build:
     if not progress:
       # Show information about the circular dependencies found and exit:
@@ -596,12 +660,20 @@ def BuildProject(path, build_info, build_config, project_config, project_name):
           for source_file_name in file_config["sources"]:
             # Files mentioned in the build configuration that have not been built cause circular dependencies:
             if source_file_name in file_configs and not source_file_name in files_built:
-              print >>sys.stderr, "    * %s:" % source_file_name;
+              print >>sys.stderr, "    * %s" % source_file_name;
+          if "includes" in file_config:
+            # For each include source file required for building this file:
+            for include_file_name in file_config["includes"]:
+              # Files mentioned in the build configuration that have not been built cause circular dependencies:
+              if include_file_name in file_configs and not include_file_name in files_built:
+                print >>sys.stderr, "    * (include) %s" % include_file_name;
       return False;
-  if not DoPostbuildTestFinishCommands(project_config, "    "):
-    return False;
-  if not CleanupProject(path, build_info, build_config, project_config, project_name):
-    return False;
+  if not g_clean_build:
+    if not DoPostbuildTestFinishCommands(project_config, "    "):
+      return False;
+  if not g_dirty_build:
+    if not CleanupProject(path, build_info, build_config, project_config, project_name):
+      return False;
   return True;
 
 def CleanupProject(path, build_info, build_config, project_config, project_name, clean_all = False):
@@ -625,6 +697,19 @@ def CleanupProject(path, build_info, build_config, project_config, project_name,
 
 def BuildFile(path, build_info, build_config, project_config, file_config, file_name):
   print "    + Build: %s" % file_name;
+  # Optionally run build commands rather than do a build through compile/assemble:
+  if "build commands" in file_config:
+    for build_command in file_config["build commands"]:
+      if type(build_command) == str:
+        build_arguments = [];
+      else:
+        build_arguments = build_command[1:];
+        build_command   = build_command[0];
+      if not RunApplication(build_command, build_arguments, pipe_stdout = True):
+        print >>sys.stderr, "      * Build command failed.";
+        return False;
+    return True;
+
   # Find out what types of source this file is to be build from:
   target_is_bin = re.match(r".*\.bin$", file_name, re.IGNORECASE) is not None;
   target_is_dll = re.match(r".*\.dll$", file_name, re.IGNORECASE) is not None;
@@ -783,11 +868,12 @@ def BuildFile(path, build_info, build_config, project_config, file_config, file_
   # Optionally run postbuild/test/finish commands:
   if not DoPostbuildTestFinishCommands(file_config, "      "):
     return False;
-  if not CleanupFile(path, file_name):
-    return False;
+  if not g_dirty_build:
+    if not CleanupFiles(path, file_name, clean_all = False):
+      return False;
   return True;
 
-def CleanupFile(path, file_name, clean_all = False):
+def CleanupFiles(path, file_name, clean_all = False):
   cleanup_errors = False;
   if clean_all and os.path.isfile(os.path.join(path, file_name)):
     print "      - Cleanup: %s" % file_name;
@@ -814,7 +900,12 @@ def DoPrebuildCommands(config, padding):
   if "prebuild commands" in config:
     for prebuild_command in config["prebuild commands"]:
       print "%s+ Prebuild: %s" % (padding, file_name);
-      if not RunApplication(prebuild_command, pipe_stdout = False):
+      if type(prebuild_command) == str:
+        prebuild_arguments = [];
+      else:
+        prebuild_arguments = prebuild_command[1:];
+        prebuild_command   = prebuild_command[0];
+      if not RunApplication(prebuild_command, prebuild_arguments, pipe_stdout = False):
         print >>sys.stderr, "%s* Prebuild command failed." % padding;
         return False;
   return True;
@@ -824,26 +915,42 @@ def DoPostbuildTestFinishCommands(config, padding):
   if "postbuild commands" in config:
     for postbuild_command in config["postbuild commands"]:
       print "%s+ Postbuild: %s" % (padding, postbuild_command);
-      if not RunApplication(postbuild_command, pipe_stdout = False):
+      if type(postbuild_command) == str:
+        postbuild_arguments = [];
+      else:
+        postbuild_arguments = postbuild_command[1:];
+        postbuild_command   = postbuild_command[0];
+      if not RunApplication(postbuild_command, postbuild_arguments, pipe_stdout = False):
         print >>sys.stderr, "%s* Postbuild command failed." % padding;
         return False;
   if "test commands" in config:
     for test_command in config["test commands"]:
       print "%s+ Test: %s" % (padding, test_command);
-      if not RunApplication(test_command, pipe_stdout = False):
+      if type(test_command) == str:
+        test_arguments = [];
+      else:
+        test_arguments = test_command[1:];
+        test_command   = test_command[0];
+      if not RunApplication(test_command, test_arguments, pipe_stdout = False):
         print >>sys.stderr, "%s* Test command failed." % padding;
         return False;
   if "finish commands" in config:
-    for final_command in config["finish commands"]:
-      print "%s+ Finish: %s" % (padding, final_command);
-      if not RunApplication(final_command, pipe_stdout = False):
+    for finish_command in config["finish commands"]:
+      print "%s+ Finish: %s" % (padding, finish_command);
+      if type(finish_command) == str:
+        finish_arguments = [];
+      else:
+        finish_arguments = finish_command[1:];
+        finish_command   = finish_command[0];
+      if not RunApplication(finish_command, finish_arguments, pipe_stdout = False):
         print >>sys.stderr, "%s* Finish command failed." % padding;
         return False;
   return True;
 
 def RunApplication(name, arguments=[], stdin="", pipe_stdout = True):
   command = "\"%s\" %s" % (name, " ".join(arguments));
-  if g_verbose_output: print "      %s" % command;
+  if g_verbose_output:
+    print "      %s" % command;
   try:
     if pipe_stdout:
       popen = subprocess.Popen(command, stdin = subprocess.PIPE, stdout = subprocess.PIPE, stderr = subprocess.PIPE);
@@ -857,14 +964,17 @@ def RunApplication(name, arguments=[], stdin="", pipe_stdout = True):
       raise e;
   stdout_data, stderr_data = popen.communicate(stdin);
   returncode = popen.wait();
-  if g_verbose_output: print "      ERRORLEVEL = %d" % returncode;
+  if g_verbose_output:
+    print "      ERRORLEVEL = %d" % returncode;
   if returncode != 0 or stderr_data != "":
     print >>sys.stderr, "  * %s returned error %d:" % (name, returncode);
     if stdout_data: print stdout_data;
     if stderr_data: print stderr_data;
     return False;
-  if g_verbose_output: print "      STDOUT = %s" % repr(stdout_data);
-  if g_verbose_output: print "      STDERR = %s" % repr(stderr_data);
+  if g_verbose_output:
+    print "      STDOUT = %s" % repr(stdout_data);
+  if g_verbose_output:
+    print "      STDERR = %s" % repr(stderr_data);
   return True;
 
 if __name__ == "__main__":
