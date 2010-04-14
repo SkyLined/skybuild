@@ -87,7 +87,7 @@ class CommandLineOptions():
     if self.switches:
       print
       print 'Switches: ';
-      for switch in self.switches.values():
+      for switch in set(self.switches.values()):
         switch.ShowHelp();
     if self.help_notes:
       print 
