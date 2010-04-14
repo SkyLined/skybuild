@@ -157,7 +157,7 @@ class Argument():
       print ('  %s' % self.name).ljust(40) + "(required)";
     else:
       print ('  %s' % self.name).ljust(40) + "(default=%s)" % self.initial_value;
-    print '      %s' % self.help_message;
+    print '      %s' % self.help_message.replace('\n', '\n      ');
 
 class Switch():
   def __init__(self, name, data):
@@ -229,7 +229,7 @@ class Switch():
       else:
         names = '  --%s [=%s]' % (self.name, valid_values);
       print names.ljust(40) + '(default=%s)' % self.default_value;
-    print '      %s' % self.help_message;
+    print '      %s' % self.help_message.replace('\n', '\n      ');
     if not self.value_required and self.initial_value != self.default_value:
       print '      (If this switch is not specified default=%s).' % self.initial_value;
 
