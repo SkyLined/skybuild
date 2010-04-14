@@ -198,7 +198,8 @@ def Main():
     help_message = """
 build - builds all projects in the current or given path, according to a build
 configuration found in the %s file in each folder. If no build configuration
-file is found, a default build configuration is generated and used.""",
+file is found, a default build configuration is generated and used.""" % 
+    BUILD_CONFIG_FILE,
     help_notes = """
 Notes:
   The default build configuration that is generated will build all .asm files
