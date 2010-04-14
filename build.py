@@ -197,9 +197,9 @@ def Main():
     application_name = 'build',
     help_message = """
 build - builds all projects in the current or given path, according to a build
-configuration found in the %s file in each folder. If no build configuration
-file is found, a default build configuration is generated and used.""" % 
-    BUILD_CONFIG_FILE,
+configuration found in the %s file in each folder. If no build 
+configuration file is found, a default build configuration is generated and 
+used.""" % BUILD_CONFIG_FILE,
     help_notes = """
 Notes:
   The default build configuration that is generated will build all .asm files
@@ -223,9 +223,8 @@ Notes:
       },
       'loop': {
         'short':    'l',
-        'help':     'If there is an error during build, pause to allow the ' \
-                    'user to fix the issue and then press ENTER to attempt ' \
-                    'building again.',
+        'help':     """If there is an error during build, pause to allow the user to fix the issue and
+then press ENTER to attempt building again.""",
         'initial':  'true',
         'default':  'true',
         'valid':    command_line_options.BOOLEAN_SWITCH_VALUES
