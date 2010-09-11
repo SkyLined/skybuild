@@ -28,8 +28,10 @@
 SETLOCAL ENABLEDELAYEDEXPANSION ENABLEEXTENSIONS
 IF "%~1"=="x86" (
   CALL :SETENV32
+  IF ERRORLEVEL 1 EXIT /B 1
 ) ELSE IF "%~1"=="x64" (
   CALL :SETENV64
+  IF ERRORLEVEL 1 EXIT /B 1
 ) ELSE (
   ECHO Usage: MSBUILD architecture command arguments>&2
   ECHO Where:
@@ -62,7 +64,9 @@ ENDLOCAL
 EXIT /B 0
 
 :SETENV32
-  IF EXIST "%VS80COMNTOOLS%vsvars32.bat" (
+  IF EXIST "%VS90COMNTOOLS%vsvars32.bat" (
+    CALL "%VS90COMNTOOLS%vsvars32.bat" >nul
+  ) ELSE IF EXIST "%VS80COMNTOOLS%vsvars32.bat" (
     CALL "%VS80COMNTOOLS%vsvars32.bat" >nul
   ) ELSE IF EXIST "%ProgramFiles%\Microsoft SDKs\Windows\v7.0\Bin\SetEnv.cmd" (
     PUSHD "%ProgramFiles%\Microsoft SDKs\Windows\v7.0\"
