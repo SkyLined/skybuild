@@ -31,17 +31,7 @@ g_create_build_config_files = False;
 g_clean_build = False;
 g_dirty_build = False;
 
-def find_in_path(filename):
-  for path in os.environ["PATH"].split(";"):
-    filepath = os.path.join(path, filename);
-    if os.path.isfile(filepath):
-      return filepath;
-  print >>sys.stderr, "\"%s\" not found." % filename;
-  exit(1);
-
 LOCAL_PATH = os.path.dirname(sys.argv[0]);         # Path of build.py
-NASM = find_in_path("nasm.exe");
-MSBUILD = find_in_path("MSBUILD.cmd");
 
 BUILD_SCRIPTS = ["build.cmd", "build.sh"];
 BUILD_CONFIG_FILE = "build_config.py";
@@ -82,6 +72,7 @@ required_project_options = [
 valid_file_options = {
     "sources": None,
     "includes": None,
+    "libs": None,
     "entry point": None, 
     "architecture": ["x86", "x64"],
     "subsystem": ["windows", "console"],
@@ -142,12 +133,37 @@ def LongPath(path = None, *sub_paths):
   # Win32 has issues with paths > MAX_PATH. The string '\\?\' allows us to work
   # around MAX_PATH limitations in most cases. One example for which this does 
   # not work is os.chdir(). No other limitations are currently known.
-  # http://msdn.microsoft.com/en-us/gozerlib.ary/aa365247.aspx
-  if (sys.platform == "win32") and not path.startswith(u"\\\\?\\"):
-    path = u"\\\\?\\" + path;
-    if not path.endswith(os.sep) and os.path.isdir(path):
-      # os.listdir does not work if the path is not terminated with a slash:
-      path += os.sep;
+  # http://msdn.microsoft.com/en-us/library/aa365247.aspx
+  if (sys.platform == "win32"):
+    if not path.startswith(u"\\\\?\\"):
+      path = u"\\\\?\\" + path;
+  return path;
+  
+def StripWindowsLongPathHeader(*path):
+  path = LongPath(*path);
+  if (sys.platform == "win32"):
+    if path.startswith(u"\\\\?\\"):
+      path = path[4:];
+  return path;
+
+def ShortPath(path, *sub_paths):
+  path = LongPath(path, *sub_paths);
+  if sys.platform == "win32":
+    if path.startswith(u"\\\\?\\"):   # Long path marker?
+      path = path[4:];                # Yes: strip
+    if path[:2] != os.getcwd()[:2]:   # Different drive?
+      return path;                    # Yes: absolute path
+  path_chunks = path.split(os.sep);             # a:\b -> ['a:' 'b']
+  cur_path_chunks = os.getcwd().split(os.sep);  # a:\b\c -> ['a:' 'b', 'c']
+  while (path_chunks and cur_path_chunks and path_chunks[0] == cur_path_chunks[0]):
+    path_chunks.pop(0);                         # []
+    cur_path_chunks.pop(0);                     # ['c']
+  for whatever in cur_path_chunks:
+    path_chunks.insert(0, '..');                # ['..']
+  if not path_chunks:
+    path = '.';
+  else:
+    path = os.sep.join(path_chunks);
   return path;
 
 def ShortName(path = None, *sub_paths):
@@ -167,25 +183,35 @@ def ShortName(path = None, *sub_paths):
     return path;
   return path[path.rfind(os.sep) + 1:];
 
-def ShortPath(path, *sub_paths):
-  path = LongPath(path, *sub_paths);
-  if sys.platform == "win32":
-    if path.startswith(u"\\\\?\\"):   # Long path marker?
-      path = path[4:];                # Yes: strip
-    if path[:2] != os.getcwd()[:2]:   # Different drive?
-      return path;                    # Yes: absolute path
-  return os.path.relpath(path, os.getcwd());
+def OsListDir(*path):
+  return os.listdir(LongPath(*path) + os.sep);
 
-def ReadFile(path):
-  assert os.path.isfile(path), "File \"%s\" not found!" % path;
-  fd = open(path, "rb");
+def OsIsFile(*path):
+  return os.access(LongPath(*path), os.F_OK);
+
+def OsDeleteFile(*path):
+  return os.remove(LongPath(*path));
+
+def OsIsDir(*path):
+  try:
+    OsListDir(LongPath(*path));
+  except:
+    return False;
+  else:
+    return True;
+
+def OsReadFile(*path):
+  assert OsIsFile(*path), "File \"%s\" not found!" % os.sep.join(path);
+  fd = open(LongPath(*path), "rb");
   try:
     return fd.read();
   finally:
     fd.close();
 
-def WriteFile(path, contents):
-  fd = open(path, "wb");
+def OsWriteFile(*path_contents):
+  contents = path_contents[-1];
+  path = path_contents[:-1];
+  fd = open(LongPath(*path), "wb");
   try:
     return fd.write(contents);
   finally:
@@ -208,7 +234,8 @@ Notes:
   one .exe file.""",
     arguments = {
       'path': {
-        'help': 'Path of the folder to build.',
+        'help':     """Path of the folder to build. Use path#project if you only want to build one
+project in a folder that contains more than one.""",
         'initial': os.getcwd(), 
         'required': False
       }
@@ -255,7 +282,11 @@ then press ENTER to attempt building again.""",
   valid_arguments, continue_execution = options.ParseArguments(sys.argv[1:]);
   if not continue_execution:
     return valid_arguments;
-  path = LongPath(options.GetArgumentValue('path'));
+  path_project = options.GetArgumentValue('path').split("#", 1);
+  if len(path_project) == 1:
+    path_project.append(None);
+  path, project = path_project;
+  path = LongPath(path);
   g_verbose_output            = options.GetSwitchValue('verbose');
   g_loop_on_error             = options.GetSwitchValue('loop');
   g_create_build_config_files = options.GetSwitchValue('create');
@@ -263,7 +294,7 @@ then press ENTER to attempt building again.""",
   g_dirty_build               = options.GetSwitchValue('dirty');
 
   while (1):
-    if not BuildFolder(path):
+    if not BuildFolder(path, project):
       if g_clean_build:
         print "@ Clean failed.";
       else:
@@ -280,8 +311,8 @@ then press ENTER to attempt building again.""",
     raw_input();
 
 def ReadWriteBuildInfo(path):
-  if os.path.isfile(os.path.join(path, BUILD_INFO_FILE)):
-    build_timestamp_txt = ReadFile(os.path.join(path, BUILD_INFO_FILE));
+  if OsIsFile(path, BUILD_INFO_FILE):
+    build_timestamp_txt = OsReadFile(path, BUILD_INFO_FILE);
     build_number_start = build_timestamp_txt.find(BUILD_NUMBER_HEADER);
     if build_number_start == -1:
       print >>sys.stderr, "  * %s is missing build number." % (BUILD_INFO_FILE, ShortName(path));
@@ -298,7 +329,7 @@ def ReadWriteBuildInfo(path):
   timestamp = time.strftime("%a, %d %b %Y %H:%M:%S (UTC)", time.gmtime());
   if not g_clean_build:
     build_number += 1;
-    WriteFile(os.path.join(path, BUILD_INFO_FILE),
+    OsWriteFile(path, BUILD_INFO_FILE,
         "This file is automatically generated by the build system to keep track of the\r\n" +
         "build number and save the timestamp of the last build.\r\n" +
         "%s %s\r\n" % (BUILD_NUMBER_HEADER, build_number) +
@@ -306,13 +337,13 @@ def ReadWriteBuildInfo(path):
   return {"number": "%s" % build_number, "timestamp": timestamp};
 
 def ReadBuildConfig(path):
-  if not os.path.isfile(os.path.join(path, BUILD_CONFIG_FILE)):
+  if not OsIsFile(path, BUILD_CONFIG_FILE):
     build_config = GenerateBuildConfig(path)
     if not build_config:
       return None;
   else:
     print >>sys.stderr, "  @ Reading build configuration.";
-    build_config_py = re.sub(r"[\r\n]+", "\n", ReadFile(os.path.join(path, BUILD_CONFIG_FILE)));
+    build_config_py = re.sub(r"[\r\n]+", "\n", OsReadFile(path, BUILD_CONFIG_FILE));
     build_config_exec_result = {};
     try:
       exec(build_config_py, build_config_exec_result);
@@ -320,8 +351,8 @@ def ReadBuildConfig(path):
       try:
         # Try to construct a human readable error message
         error_messages = [
-            "  * Syntax error in \"%s\" on line #%s, character %s:" % (
-                os.path.join(ShortName(path), BUILD_CONFIG_FILE), e.lineno, e.offset),
+            "  * Syntax error in \"%s\" on line #%s, character %s:" % \
+                (ShortName(path, BUILD_CONFIG_FILE), e.lineno, e.offset),
             "    ->%s" % re.sub(r"[\r\n]*$", "", e.text) ];
       except:
         print >>sys.stderr, "  * Syntax error in \"%s\":" % BUILD_CONFIG_FILE;
@@ -344,18 +375,18 @@ def GenerateBuildConfig(path, sub_folder = False):
   if not sub_folder:
     print "  @ Generating build configuration.";
   folder_has_targets = False;
-  for file_or_folder in os.listdir(path):
-    if os.path.isfile(os.path.join(path, file_or_folder)):
+  for file_or_folder in OsListDir(path):
+    if OsIsFile(path, file_or_folder):
       source_filename = file_or_folder;
       source_filename_without_extension = re.sub(r"\.[^\.]+$", "", source_filename);
       if source_filename.endswith(".asm"):
-        if os.path.isfile(os.path.join(path, source_filename_without_extension + ".c")):
+        if OsIsFile(path, source_filename_without_extension + ".c"):
           # Both .c and .asm exist; assume they need to be build and linked into one .exe:
           target = source_filename_without_extension + "_asm.obj"
         else:
           target = source_filename_without_extension + ".bin"
       elif source_filename.endswith(".c") or source_filename.endswith(".cpp"):
-        if os.path.isfile(os.path.join(path, source_filename_without_extension + ".asm")):
+        if OsIsFile(path, source_filename_without_extension + ".asm"):
           # Both .c/.cpp and .asm exist; assume they need to be build and linked into one .exe:
           target = source_filename_without_extension + "_c.obj";
           sources2 = [target, source_filename_without_extension + "_asm.obj"];
@@ -374,14 +405,14 @@ def GenerateBuildConfig(path, sub_folder = False):
       files_lines += ["          \"sources\": [%s]" % repr(source_filename)];
       files_lines += ["        },"];
       folder_has_targets = True;
-    elif os.path.isdir(os.path.join(path, file_or_folder)):
+    elif OsIsDir(path, file_or_folder):
       child_folder = file_or_folder;
       # We do not want to add ".svn" folders and such!
       if not child_folder.startswith("."):
         # Only if there is something to build in the child folder or its children, do we add it to the build config:
         for build_script in BUILD_SCRIPTS:
           # Does the child folder have a build script?
-          if os.path.isfile(os.path.join(path, child_folder, build_script)):
+          if OsIsFile(path, child_folder, build_script):
             folders += [child_folder];
             folders_lines += ["    %s," % repr(child_folder)];
             folder_has_targets = True;
@@ -389,13 +420,13 @@ def GenerateBuildConfig(path, sub_folder = False):
         else:
           # Does the child folder have a BUILD_CONFIG_FILE or can we create one (only returns true if there is something
           # to build in the child folder or its children):
-          if (os.path.isfile(os.path.join(path, child_folder, BUILD_CONFIG_FILE))
-              or GenerateBuildConfig(os.path.join(path, child_folder), sub_folder = True)):
+          if (OsIsFile(path, child_folder, BUILD_CONFIG_FILE)
+              or GenerateBuildConfig(LongPath(path, child_folder), sub_folder = True)):
             folders += [child_folder];
             folders_lines += ["    %s," % repr(child_folder)];
             folder_has_targets = True;
     else:
-      print >>sys.stderr, "  * \"%s\" is neither a file or a folder!?" % ShortPath(os.path.join(path, file_or_folder));
+      print >>sys.stderr, "  * \"%s\" is neither a file or a folder!?" % ShortPath(path, file_or_folder);
       return False;
   if not folder_has_targets:
     if sub_folder:
@@ -433,24 +464,18 @@ def GenerateBuildConfig(path, sub_folder = False):
   build_config_lines += [
     "}"];
   if g_create_build_config_files:
-    build_config_py = open(os.path.join(path, BUILD_CONFIG_FILE), "wb");
-    if build_config_py is None:
-      print >>sys.stderr, "  * Creating file \"%s\" failed." % os.path.join(path, BUILD_CONFIG_FILE);
-      return False;
     try:
-      build_config_py.write("\r\n".join(build_config_lines + [""]));
+      OsWriteFile(path, BUILD_CONFIG_FILE, "\r\n".join(build_config_lines + [""]));
     except:
-      print >>sys.stderr, "  * Creating file \"%s\" failed." % os.path.join(path, BUILD_CONFIG_FILE);
+      print >>sys.stderr, "  * Creating file \"%s\" failed." % LongPath(path, BUILD_CONFIG_FILE);
       return False;
-    finally:
-      build_config_py.close();
   return build_config;
 
-def BuildFolder(path, build_info = None, root_folder_build_config = None):
+def BuildFolder(path, project, build_info = None, root_folder_build_config = None):
   saved_path = os.getcwd();
   short_path = ShortPath(path);
   print "== %s ==" % ShortName(path);
-  if not os.path.isdir(short_path):
+  if not OsIsDir(short_path):
     print >>sys.stderr, "  @ Folder \"%s\" not found!" % short_path;
     return False;
   os.chdir(short_path);
@@ -462,11 +487,20 @@ def BuildFolder(path, build_info = None, root_folder_build_config = None):
         print >>sys.stderr, "  * Getting/setting build number and timestamp failed.";
         return False;
     for build_script in BUILD_SCRIPTS:
-      if os.path.isfile(build_script):
+      if OsIsFile(build_script):
         return RunApplication(build_script, [build_info["number"], build_info["timestamp"]], pipe_stdout = False);
     build_config = ReadBuildConfig(path);
     if build_config is None:
       return False;
+    if project is not None:
+      # We will only be building one project
+      if "projects" not in build_config:
+        print >>sys.stderr, "  @ Build config contains no projects!";
+        return False;
+      if project not in build_config["projects"]:
+        print >>sys.stderr, "  @ Project \"%s\" not found!" % project;
+        return False;
+      build_config["projects"] = {project: build_config["projects"][project]};
     build_info["version"] = GetOption("version", DEFAULT_VERSION, build_config, root_folder_build_config);
     print "  @ Version %s, build %s, started at %s" % (
         build_info["version"], build_info["number"], build_info["timestamp"])
@@ -480,7 +514,7 @@ def BuildFolder(path, build_info = None, root_folder_build_config = None):
       else:
         print "  @ Building child folders:";
       for child_folder in child_folders:
-        if not BuildFolder(os.path.join(path, child_folder), build_info, root_folder_build_config):
+        if not BuildFolder(LongPath(path, child_folder), build_info, root_folder_build_config):
           return False;
       print "== %s ==" % ShortName(path);
       if g_clean_build:
@@ -492,7 +526,7 @@ def BuildFolder(path, build_info = None, root_folder_build_config = None):
     if not g_clean_build:
       if not DoPrebuildCommands(build_config, "  "):
         return False;
-    project_configs = GetOption("projects", [], build_config);
+    project_configs = GetOption("projects", {}, build_config);
     projects_built = [];
     while (len(projects_built) < len(project_configs)):
       progress = False;
@@ -574,14 +608,14 @@ def BuildFolder(path, build_info = None, root_folder_build_config = None):
 
 def CleanupFolder(path, build_info, build_config, clean_all = False):
   if clean_all:
-    project_configs = GetOption("projects", None, build_config);
+    project_configs = GetOption("projects", {}, build_config);
     for project_name, project_config in project_configs.items():
       CleanupProject(path, build_info, build_config, project_config, project_name, clean_all = True);
   for pdb_file_name in ["vc80.pdb", "vc90.pdb"]:
-    if os.path.isfile(os.path.join(path, pdb_file_name)):
+    if OsIsFile(path, pdb_file_name):
       print "  - Cleanup: %s" % pdb_file_name;
       try:
-        os.remove(os.path.join(path, pdb_file_name));
+        OsDeleteFile(path, pdb_file_name);
       except OSError:
         print >>sys.stderr, "    * Cannot cleanup intermediate file \"%s\"." % pdb_file_name;
         return False;
@@ -600,7 +634,7 @@ def BuildProject(path, build_info, build_config, project_config, project_name):
   if not g_clean_build:
     if not DoPrebuildCommands(project_config, "    "):
       return False;
-  file_configs = GetOption("files", None, project_config);
+  file_configs = GetOption("files", {}, project_config);
   files_built = [];
   while (len(files_built) < len(file_configs)):
     progress = False;
@@ -622,8 +656,8 @@ def BuildProject(path, build_info, build_config, project_config, project_name):
           # If this file is not mentioned in the build configuration, it must be a static source file:
           if source_file_name not in file_configs:
             # Check if the source file exists:
-            if not os.path.isfile(os.path.join(path, source_file_name)):
-              print >>sys.stderr, "    * Missing source file \"%s\" for for \"%s\"." % (source_file_name, file_name);
+            if not OsIsFile(path, source_file_name):
+              print >>sys.stderr, "    * Missing source file \"%s\" for \"%s\"." % (source_file_name, file_name);
               return False;
           # If this file is mentioned in the build configuration, see if it has already been built:
           elif not source_file_name in files_built:
@@ -639,8 +673,8 @@ def BuildProject(path, build_info, build_config, project_config, project_name):
             # If this file is not mentioned in the build configuration, it must be a static include source file:
             if include_file_name not in file_configs:
               # Check if the include source file exists:
-              if not os.path.isfile(os.path.join(path, include_file_name)):
-                print >>sys.stderr, "    * Missing include source file \"%s\" for for \"%s\"." % \
+              if not OsIsFile(path, include_file_name):
+                print >>sys.stderr, "    * Missing include source file \"%s\" for \"%s\"." % \
                     (include_file_name, file_name);
                 return False;
             # If this file is mentioned in the build configuration, see if it has already been built:
@@ -652,6 +686,7 @@ def BuildProject(path, build_info, build_config, project_config, project_name):
                 print "      - Waiting for \"%s\"..." % include_file_name;
               wait_for_sources = True;
               break;
+        # libs need no checking
         if not wait_for_sources:
           # All sources have been built; we can build this file:
           if not BuildFile(path, build_info, build_config, project_config, file_config, file_name):
@@ -689,7 +724,7 @@ def BuildProject(path, build_info, build_config, project_config, project_name):
 
 def CleanupProject(path, build_info, build_config, project_config, project_name, clean_all = False):
   cleanup_errors = False;
-  file_configs = GetOption("files", None, project_config);
+  file_configs = GetOption("files", {}, project_config);
   for file_name, file_config in file_configs.items():
     if "cleanup" in file_config:
       # If cleanup is specified, use that setting:
@@ -697,10 +732,10 @@ def CleanupProject(path, build_info, build_config, project_config, project_name,
     else:
       # Otherwise default to True for .obj files and False for other files:
       cleanup = re.match(r".*\.obj$", file_name, re.IGNORECASE) is not None;
-    if os.path.isfile(os.path.join(path, file_name)) and (cleanup or clean_all):
+    if OsIsFile(path, file_name) and (cleanup or clean_all):
       print "    - Cleanup: %s" % file_name;
       try:
-        os.remove(os.path.join(path, file_name));
+        OsDeleteFile(path, file_name);
       except OSError:
         print >>sys.stderr, "  * Cannot cleanup intermediate file \"%s\"." % file_name;
         cleanup_errors = True;
@@ -810,6 +845,10 @@ def BuildFile(path, build_info, build_config, project_config, file_config, file_
     return False;
   # Build the target
   if (target_is_obj or target_is_bin) and sources_includes_asm:
+    if "libs" in file_config:
+      print >>sys.stderr, "  * Cannot use .lib files when generating .%s file." % \
+          {True:"bin", False:"obj"}[target_is_bin];
+      return False;
     # The source is assembler, use NASM:
     nasm_arguments = [];
     for source_file_name in file_config["sources"]:
@@ -823,9 +862,12 @@ def BuildFile(path, build_info, build_config, project_config, file_config, file_
       nasm_arguments += ["-f bin"];
     elif target_is_obj:
       nasm_arguments += ["-f %s" % {"x86": "win32", "x64": "win64"}[architecture]];
-    if not RunApplication(NASM, nasm_arguments):
+    if not RunNasm(nasm_arguments):
       return False;
   elif (target_is_obj) and (sources_includes_c or sources_includes_cpp):
+    if "libs" in file_config:
+      print >>sys.stderr, "  * Cannot use .lib files when generating .obj file.";
+      return False;
     # The source is C, use CL:
     cl_arguments = [];
     link_arguments = [];
@@ -848,7 +890,7 @@ def BuildFile(path, build_info, build_config, project_config, file_config, file_
       cl_arguments += ["/link"];
       cl_arguments += link_arguments;
     msbuild_arguments = [architecture, "CL"] + cl_arguments;
-    if not RunApplication(MSBUILD, msbuild_arguments):
+    if not RunMsBuild(msbuild_arguments):
       return False;
   elif (target_is_exe or target_is_dll) and sources_includes_obj:
     # The source is obj, use LINK:
@@ -858,6 +900,9 @@ def BuildFile(path, build_info, build_config, project_config, file_config, file_
         link_arguments += ["/DEF:\"%s\"" % source_file_name];
       else:
         link_arguments += ["\"%s\"" % source_file_name];
+    if "libs" in file_config:
+      for lib_file_name in file_config["libs"]:
+        link_arguments += ["\"%s\"" % lib_file_name];
     if entry_point:
       link_arguments += ["/entry:%s" % entry_point];
     if debug:
@@ -867,12 +912,12 @@ def BuildFile(path, build_info, build_config, project_config, file_config, file_
     elif target_is_dll:
       link_arguments += ["/DLL"];
     msbuild_arguments = [architecture, "LINK"] + link_arguments;
-    if not RunApplication(MSBUILD, msbuild_arguments):
+    if not RunMsBuild(msbuild_arguments):
       return False;
   else:
     print >>sys.stderr, "  * No handled file types in sources for \"%s\"." % file_name;
     return False;
-  if not os.path.isfile(LongPath(path, file_name)):
+  if not OsIsFile(path, file_name):
     print >>sys.stderr, "  * The target file \"%s\" was not created, but the build command did not report an error." % (
         file_name);
     return False;
@@ -886,18 +931,18 @@ def BuildFile(path, build_info, build_config, project_config, file_config, file_
 
 def CleanupFiles(path, file_name, clean_all = False):
   cleanup_errors = False;
-  if clean_all and os.path.isfile(os.path.join(path, file_name)):
+  if clean_all and OsIsFile(path, file_name):
     print "      - Cleanup: %s" % file_name;
     try:
-      os.remove(os.path.join(path, file_name));
+      OsDeleteFile(path, file_name);
     except OSError:
       print >>sys.stderr, "    * Cannot cleanup file \"%s\"." % file_name;
       cleanup_errors = True;
     pdb_file_name = re.sub(r"\.[^\.]*$", ".pdb", file_name);
-    if os.path.isfile(os.path.join(path, pdb_file_name)):
+    if OsIsFile(path, pdb_file_name):
       print "      - Cleanup: %s" % pdb_file_name;
       try:
-        os.remove(os.path.join(path, pdb_file_name));
+        OsDeleteFile(path, pdb_file_name);
       except OSError:
         print >>sys.stderr, "    * Cannot cleanup debug symbols file \"%s\"." % intermediate_file_name;
         cleanup_errors = True;
@@ -905,10 +950,10 @@ def CleanupFiles(path, file_name, clean_all = False):
                              re.sub(r"\.[^\.]*$", ".exp", file_name),
                              re.sub(r"\.[^\.]*$", ".lib", file_name)];
   for intermediate_file_name in intermediate_file_names:
-    if os.path.isfile(os.path.join(path, intermediate_file_name)):
+    if OsIsFile(path, intermediate_file_name):
       print "      - Cleanup: %s" % intermediate_file_name;
       try:
-        os.remove(os.path.join(path, intermediate_file_name));
+        OsDeleteFile(path, intermediate_file_name);
       except OSError:
         print >>sys.stderr, "    * Cannot cleanup intermediate file \"%s\"." % intermediate_file_name;
         cleanup_errors = True;
@@ -966,8 +1011,29 @@ def DoPostbuildTestFinishCommands(config, padding):
         return False;
   return True;
 
-def RunApplication(name, arguments=[], stdin="", pipe_stdout = True):
-  command = "\"%s\" %s" % (name, " ".join(arguments));
+def FindInPath(filename):
+  for path in os.environ["PATH"].split(";"):
+    filepath = LongPath(path, filename);
+    if OsIsFile(filepath):
+      return filepath;
+  print >>sys.stderr, "\"%s\" not found." % filename;
+  return None;
+
+def RunNasm(nasm_arguments):
+  nasm_exe_path = FindInPath("nasm.exe");
+  if nasm_exe_path is None:
+    return False;
+  return RunApplication(nasm_exe_path, nasm_arguments);
+
+def RunMsBuild(msbuild_arguments):
+  msbuild_cmd_path = FindInPath("MSBUILD.cmd");
+  if msbuild_cmd_path is None:
+    return False;
+  return RunApplication(msbuild_cmd_path, msbuild_arguments);
+
+def RunApplication(path, arguments=[], stdin="", pipe_stdout = True):
+  path = StripWindowsLongPathHeader(path);
+  command = "\"%s\" %s" % (path, " ".join(arguments));
   if g_verbose_output:
     print "      %s" % command;
   try:
@@ -977,7 +1043,7 @@ def RunApplication(name, arguments=[], stdin="", pipe_stdout = True):
       popen = subprocess.Popen(command, stdin = subprocess.PIPE,                           stderr = subprocess.PIPE);
   except WindowsError, e:
     if e.errno == 2:
-      print >>sys.stderr, "  * Application \"%s\" not found." % name;
+      print >>sys.stderr, "  * Application \"%s\" not found." % path;
       return False;
     else:
       raise e;
@@ -986,7 +1052,7 @@ def RunApplication(name, arguments=[], stdin="", pipe_stdout = True):
   if g_verbose_output:
     print "      ERRORLEVEL = %d" % returncode;
   if returncode != 0 or stderr_data != "":
-    print >>sys.stderr, "  * %s returned error %d:" % (name, returncode);
+    print >>sys.stderr, "  * %s returned error %d:" % (path, returncode);
     if stdout_data: print stdout_data;
     if stderr_data: print stderr_data;
     return False;
@@ -999,4 +1065,4 @@ def RunApplication(name, arguments=[], stdin="", pipe_stdout = True):
 if __name__ == "__main__":
   result = Main();
   exit_code = {True:0, False:1}[result];
-  exit(exit_code);
+  sys.exit(exit_code);
