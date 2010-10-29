@@ -26,42 +26,43 @@
 
 :: Enable delayed environment variable expansion and command extensions, if not enabled already:
 SETLOCAL ENABLEDELAYEDEXPANSION ENABLEEXTENSIONS
-IF "%~1"=="x86" (
-  CALL :SETENV32
-  IF ERRORLEVEL 1 EXIT /B 1
-) ELSE IF "%~1"=="x64" (
-  CALL :SETENV64
-  IF ERRORLEVEL 1 EXIT /B 1
-) ELSE (
-  ECHO Usage: MSBUILD architecture command arguments>&2
-  ECHO Where:
-  ECHO   architecture      - Target architecture ^(x86 or x64^),
-  ECHO   command arguments - Command to execute ^(eg CL, LINK, DUMPBIN^) and arguments.
-  ENDLOCAL
-  EXIT /B 1
-)
-:: If no argument is specified, keep the local environment and exit:
-IF "%~2" == "" IF "%2" == "" (
-  CMD /K PROMPT MSBUILD $P$G
-  EXIT /B 0
-)
-:: I would like to do a "SHIFT /1 & %*" to remove the first argument and execute arguments %2 and upwards as a command.
-:: Unfortunately, SHIFT does not seem to affect %* at all, so we have to work around this by remove this first 
-:: four characters from %*, because the first argument is always three characters and separated by one space from the
-:: second argument:
-SET command=%*
-SET command=!command:~4!
-!command!
+CALL :MAIN %*
+SET result=%ERRORLEVEL%
 IF ERRORLEVEL 1 (
   :: On Windows XP, errorlevel is not passed on correctly for unknown reasons. This means that "build.py" will not be
   :: able to detect the a problem during building. To fix this issue, a CRLF is output to stderr: if "build.py" sees
   :: ANY output to stderr, it assumes the build failed and report the problem.
-  ENDLOCAL
   ECHO ERROR>&2
-  EXIT /B 1
+) ELSE IF "%~2" == "" IF "%2" == "" (
+  :: If no argument is specified, start a new shell:
+  CMD /K PROMPT MSBUILD $P$G
+  SET result=%ERRORLEVEL%
 )
-ENDLOCAL
-EXIT /B 0
+:: Once we ENDLOCAL we will lose all state, so the EXIT needs to be on the same line to allow %result% to be used:
+ENDLOCAL & EXIT /B %result%
+
+:MAIN
+  IF "%~1"=="x86" (
+    CALL :SETENV32
+    IF ERRORLEVEL 1 EXIT /B %ERRORLEVEL%
+  ) ELSE IF "%~1"=="x64" (
+    CALL :SETENV64
+    IF ERRORLEVEL 1 EXIT /B %ERRORLEVEL%
+  ) ELSE (
+    ECHO Usage: MSBUILD architecture command arguments>&2
+    ECHO Where:
+    ECHO   architecture      - Target architecture ^(x86 or x64^),
+    ECHO   command arguments - Command to execute ^(eg CL, LINK, DUMPBIN^) and arguments.
+    EXIT /B 1
+  )
+  
+  :: I would like to do a "SHIFT /1 & %*" to remove the first argument and execute arguments %2 and upwards as a command.
+  :: Unfortunately, SHIFT does not seem to affect %* at all, so we have to work around this by remove this first 
+  :: four characters from %*, because the first argument is always three characters and separated by one space from the
+  :: second argument:
+  SET command=%*
+  !command:~4!
+  EXIT /B %ERRORLEVEL%
 
 :SETENV32
   IF EXIST "%VS90COMNTOOLS%vsvars32.bat" (
