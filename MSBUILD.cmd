@@ -1,4 +1,4 @@
-::@ECHO OFF
+@ECHO OFF
 :: Copyright (c) 2009-2010, Berend-Jan "SkyLined" Wever <berendjanwever@gmail.com>
 :: All rights reserved.
 :: 
