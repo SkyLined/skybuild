@@ -1,4 +1,4 @@
-# Copyright (c) 2009-2010, Berend-Jan "SkyLined" Wever <berendjanwever@gmail.com>
+# Copyright (c) 2009-2013, Berend-Jan "SkyLined" Wever <berendjanwever@gmail.com>
 # All rights reserved.
 # 
 # Redistribution and use in source and binary forms, with or without
@@ -45,8 +45,9 @@ valid_build_options = {
     "verbose": [True, False], 
     "folders": None, 
     "projects": None, 
-    "architecture": ["x86", "x64"],
+    "architecture": ["x86", "x64", "x86/x64"],
     "debug": [True, False],
+    "static link": [True, False],
     "defines": None,
     "prebuild commands": None, 
     "postbuild commands": None,
@@ -58,8 +59,9 @@ valid_project_options = {
     "version": None, 
     "files": None, 
     "dependencies": None,
-    "architecture": ["x86", "x64"],
+    "architecture": ["x86", "x64", "x86/x64"],
     "debug": [True, False],
+    "static link": [True, False],
     "defines": None,
     "prebuild commands": None, 
     "postbuild commands": None,
@@ -74,10 +76,11 @@ valid_file_options = {
     "includes": None,
     "libs": None,
     "entry point": None, 
-    "architecture": ["x86", "x64"],
+    "architecture": ["x86", "x64", "x86/x64"],
     "subsystem": ["windows", "console"],
     "cleanup": [True, False],
     "debug": [True, False],
+    "static link": [True, False],
     "defines": None,
     "prebuild commands": None, 
     "build commands": None, 
@@ -119,7 +122,7 @@ def CheckConfigOptions(config, name, required_options, valid_options):
         print >>sys.stderr, "  * Unknown option \"%s\" for %s." % (option_name, name);
         return False;
       if valid_options[option_name] and config[option_name] not in valid_options[option_name]:
-        print >>sys.stderr, "  * Invalid option \"%s\"=%s for %s." % (option_name, config[option_name], name);
+        print >>sys.stderr, "  * Invalid option \"%s\"=\"%s\" for %s." % (option_name, config[option_name], name);
         return False;
   return True;
 
@@ -780,8 +783,8 @@ def BuildFile(path, build_info, build_config, project_config, file_config, file_
     print >>sys.stderr, "  * Cannot generate .%s files from .obj source files for \"%s\"." % (
       {True:"bin", False:"obj"}[target_is_bin], file_name);
   # Parse architecture option if provided (default is x86):
-  architecture = GetOption("architecture", "x86", file_config, project_config, build_config);
-  if not architecture in ["x64", "x86"]:
+  architecture = GetOption("architecture", "x86/x64", file_config, project_config, build_config);
+  if not architecture in ["x64", "x86", "x86/x64"]:
     print >>sys.stderr, "  * Unknown architecture for \"%s\": \"%s\"." % (file_name, architecture);
     return False;
   # Parse subsystem option if provided (default is console):
@@ -793,6 +796,11 @@ def BuildFile(path, build_info, build_config, project_config, file_config, file_
   debug = GetOption("debug", target_is_exe or target_is_dll, file_config, project_config, build_config);
   if not debug in [True, False]:
     print >>sys.stderr, "  * Unknown debug option for \"%s\": \"%s\"." % (file_name, debug);
+    return False;
+  # Parse static link option if provided (on by default for .exe and .dll targets):
+  static_link = GetOption("static link", target_is_exe or target_is_dll, file_config, project_config, build_config);
+  if not static_link in [True, False]:
+    print >>sys.stderr, "  * Unknown static link option for \"%s\": \"%s\"." % (file_name, static_link);
     return False;
   # Parse entry point option if provided (default is None: let the linker decide):
   entry_point = GetOption("entry point", None, file_config, project_config, build_config);
@@ -807,9 +815,6 @@ def BuildFile(path, build_info, build_config, project_config, file_config, file_
     defines[name] = value;
   for name, value in GetOption("defines", {}, file_config).items():
     defines[name] = value;
-  if not debug in [True, False]:
-    print >>sys.stderr, "  * Unknown debug option for \"%s\": \"%s\"." % (file_name, debug);
-    return False;
   # Parse entry point option if provided (default is None: let the linker decide):
   entry_point = GetOption("entry point", None, file_config, project_config, build_config);
 
@@ -818,11 +823,11 @@ def BuildFile(path, build_info, build_config, project_config, file_config, file_
     return False;
   # Build the target
   if (target_is_obj or target_is_bin) and sources_includes_asm:
+    # The source is assembler, use NASM:
     if "libs" in file_config:
       print >>sys.stderr, "  * Cannot use .lib files when generating .%s file." % \
           {True:"bin", False:"obj"}[target_is_bin];
       return False;
-    # The source is assembler, use NASM:
     nasm_arguments = [];
     for source_file_name in file_config["sources"]:
       nasm_arguments += ["\"%s\"" % source_file_name];
@@ -834,14 +839,20 @@ def BuildFile(path, build_info, build_config, project_config, file_config, file_
     if target_is_bin:
       nasm_arguments += ["-f bin"];
     elif target_is_obj:
+      if architecture not in ["x86", "x64"]:
+        print >>sys.stderr, "  * Cannot build for %s architecture when generating .obj file." % architecture;
+        return False;
       nasm_arguments += ["-f %s" % {"x86": "win32", "x64": "win64"}[architecture]];
     if not RunNasm(nasm_arguments):
       return False;
   elif (target_is_obj) and (sources_includes_c or sources_includes_cpp):
+    # The source is C, use CL:
     if "libs" in file_config:
       print >>sys.stderr, "  * Cannot use .lib files when generating .obj file.";
       return False;
-    # The source is C, use CL:
+    if architecture not in ["x86", "x64"]:
+      print >>sys.stderr, "  * Cannot build for %s architecture when generating from .c/.cpp files." % architecture;
+      return False;
     cl_arguments = [];
     link_arguments = [];
     for source_file_name in file_config["sources"]:
@@ -851,6 +862,15 @@ def BuildFile(path, build_info, build_config, project_config, file_config, file_
       cl_arguments += ["/D%s=\"%s\"" % (name, value)];
     if debug:
       cl_arguments += ["/Zi"];
+      if static_link:
+        cl_arguments += ["/MTd"];
+      else:
+        cl_arguments += ["/MDd"];
+    else:
+      if static_link:
+        cl_arguments += ["/MT"];
+      else:
+        cl_arguments += ["/MD"];
     if target_is_exe or target_is_dll:
       cl_arguments += ["/Fe\"%s\"" % file_name];
       if target_is_exe:
@@ -867,6 +887,9 @@ def BuildFile(path, build_info, build_config, project_config, file_config, file_
       return False;
   elif (target_is_exe or target_is_dll) and sources_includes_obj:
     # The source is obj, use LINK:
+    if architecture not in ["x86", "x64"]:
+      print >>sys.stderr, "  * Cannot link for %s architecture when generating .exe/.dll file.";
+      return False;
     link_arguments = ["/NOLOGO", "/OUT:\"%s\"" % file_name];
     for source_file_name in file_config["sources"]:
       if re.match(r".*\.def$", source_file_name, re.IGNORECASE) is not None:
@@ -987,8 +1010,8 @@ def DoPostbuildTestFinishCommands(config, padding):
         return False;
   return True;
 
-def FindInPath(file_name):
-  for path in os.environ["PATH"].split(";"):
+def FindFile(file_name):
+  for path in [os.getcwd(), os.path.dirname(__file__)] + os.environ["PATH"].split(";"):
     file_path = os.path.join(path, file_name);
     if OsIsFile(file_path):
       return file_path;
@@ -996,13 +1019,13 @@ def FindInPath(file_name):
   return None;
 
 def RunNasm(nasm_arguments):
-  nasm_exe_path = FindInPath("nasm.exe");
+  nasm_exe_path = FindFile("nasm.exe");
   if nasm_exe_path is None:
     return False;
   return RunApplication(nasm_exe_path, nasm_arguments);
 
 def RunMsBuild(msbuild_arguments):
-  msbuild_cmd_path = FindInPath("MSBUILD.cmd");
+  msbuild_cmd_path = FindFile("MSBUILD.cmd");
   if msbuild_cmd_path is None:
     return False;
   return RunApplication(msbuild_cmd_path, msbuild_arguments);
